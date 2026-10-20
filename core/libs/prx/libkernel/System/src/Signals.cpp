@@ -40,6 +40,8 @@ constexpr int GuestSigstop = 17;
 constexpr int GuestSigalrm = 14;
 constexpr int SaRestart = 0x2;
 constexpr int SaSiginfo = 0x40;
+constexpr int SaDefinedFlags = 0x7f;
+constexpr std::uint32_t UncatchableWord0 = (1u << (GuestSigkill - 1)) | (1u << (GuestSigstop - 1));
 std::atomic<GuestHandler> handlers[MaxSignal + 1]{};
 static_assert(std::atomic<GuestHandler>::is_always_lock_free);
 std::atomic<std::uint32_t> blockedMask{0};
@@ -144,6 +146,7 @@ int NativeSignal(int guest) {
         default: return 0;
     }
 }
+bool DefaultIgnored(int guest) { return guest == 16 || guest == 20 || guest == 23 || guest == 28 || guest == 29; }
 void Dispatch(int native) {
     int guest = 0;
     for (int candidate : {2, 4, 6, 8, 11, 15})
@@ -486,6 +489,7 @@ GuestHandler APS5_VABI signal_nid_postfix(int guest, GuestHandler handler) {
 int APS5_VABI sigaction_nid_postfix(int guest, const GuestSigaction* action, GuestSigaction* previous) {
     if (guest < 1 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
     if (action && (guest == GuestSigkill || guest == GuestSigstop) && action->handler != 0) { *__error_nid_postfix() = 22; return -1; }
+    if (action && action->handler > 1 && (action->flags & ~SaDefinedFlags) != 0) { *__error_nid_postfix() = 22; return -1; }
     std::lock_guard lock(registration);
     const GuestSigaction old = dispositions[guest];
     if (action) {
@@ -496,9 +500,11 @@ int APS5_VABI sigaction_nid_postfix(int guest, const GuestSigaction* action, Gue
     return 0;
 }
 int APS5_VABI raise_nid_postfix(int guest) {
-    if (guest < 1 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
+    if (guest < 0 || guest > MaxSignal) { *__error_nid_postfix() = 22; return -1; }
+    if (guest == 0) return 0;
     const GuestSigaction action = Disposition(guest);
     if (action.handler > 1 && !Delivered(action)) throw std::runtime_error("raise: SA_SIGINFO handlers are not delivered");
+    if (action.handler == 0 && DefaultIgnored(guest)) return 0;
     if (SignalBlocked(guest)) {
         if (action.handler != 1) MarkPending(guest);
         return 0;
@@ -555,7 +561,7 @@ int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, Guest
         if (set != nullptr) {
             switch (how) {
                 case 1:
-                    blockedMask.fetch_or(set->bits[0]);
+                    blockedMask.fetch_or(set->bits[0] & ~UncatchableWord0);
                     for (int word = 1; word < 4; ++word) blockedMaskExtra[word - 1].fetch_or(set->bits[word]);
                     break;
                 case 2:
@@ -563,7 +569,7 @@ int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, Guest
                     for (int word = 1; word < 4; ++word) blockedMaskExtra[word - 1].fetch_and(~set->bits[word]);
                     break;
                 case 3:
-                    blockedMask.store(set->bits[0]);
+                    blockedMask.store(set->bits[0] & ~UncatchableWord0);
                     for (int word = 1; word < 4; ++word) blockedMaskExtra[word - 1].store(set->bits[word]);
                     break;
             }
@@ -628,7 +634,7 @@ int APS5_VABI sigsuspend_nid_postfix(const GuestSignalSet* set) {
     GuestSignalSet previous{{0, 0, 0, 0}};
     {
         std::lock_guard lock(registration);
-        previous.bits[0] = blockedMask.exchange(set->bits[0]);
+        previous.bits[0] = blockedMask.exchange(set->bits[0] & ~UncatchableWord0);
         for (int word = 1; word < 4; ++word) previous.bits[word] = blockedMaskExtra[word - 1].exchange(set->bits[word]);
     }
     WaitForDeliverableSignal();
