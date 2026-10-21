@@ -655,6 +655,7 @@ bool ValidationKey(const Context& context, std::span<const CompiledShader> shade
         add(state.rectList);
         add(state.topology);
         add(state.cullMode);
+        add(state.polygonMode);
         add(state.blends.size());
         add(context.subgroup.subgroupSize);
         add(context.subgroup.supportedStages);
@@ -2970,6 +2971,12 @@ std::shared_ptr<StorageTexture> metadataPassResident(const Context& context, con
     return resident != nullptr && resident->GuestBytes() == color.bytes ? resident : nullptr;
 }
 
+}
+
+void RunDepthCopyPass(const Context& context, const DepthCopyPass& pass) {
+    Require(pass.color.tileMode != ColorTileMode::Linear && context.detiler != nullptr, "DB depth copy into a target without a resident image is not implemented");
+    const auto resident = CachedStorageSurface(context, SurfaceForTarget(pass.color));
+    CopyDepthSample(context, pass.depthAddress, pass.samples, pass.sample, *resident, resident->StorageView(0, false), pass.extent);
 }
 
 void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass) {
