@@ -106,6 +106,11 @@ if(BUILD_TESTING)
     target_link_libraries(relinker_game_patch_tests PRIVATE relinker_core)
     add_test(NAME relinker_game_patch COMMAND relinker_game_patch_tests)
     set_tests_properties(relinker_game_patch PROPERTIES TIMEOUT 30)
+
+    add_test_executable(call_registry_writer_tests ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/CallRegistryWriterTests.cpp)
+    target_link_libraries(call_registry_writer_tests PRIVATE relinker_core)
+    add_test(NAME call_registry_writer COMMAND call_registry_writer_tests)
+    set_tests_properties(call_registry_writer PROPERTIES TIMEOUT 20)
 endif()
 
 if(ANYPS5_BUILD_WASM)
@@ -634,6 +639,7 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_unused_import_dependencies.py
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
         set_property(TEST guest_unused_import_dependencies APPEND PROPERTY LABELS relinker)
+        add_asan_test_options(guest_unused_import_dependencies verify_asan_link_order=0)
         add_test(NAME guest_export_lookup COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_export_lookup.py $<TARGET_FILE:relinker>)
         set_tests_properties(guest_export_lookup PROPERTIES TIMEOUT 30)
@@ -643,6 +649,7 @@ if(BUILD_TESTING)
         add_asan_test_options(guest_module_args verify_asan_link_order=0)
         add_asan_test_options(guest_deferred_dependencies verify_asan_link_order=0)
         add_asan_test_options(guest_module_fini verify_asan_link_order=0)
+        add_asan_test_options(guest_unused_import_dependencies verify_asan_link_order=0)
         add_test(NAME guest_needed_nested_modules COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_guest_needed_nested_modules.py $<TARGET_FILE:relinker>)
         add_test(NAME guest_zero_initializer COMMAND ${Python3_EXECUTABLE}
@@ -650,6 +657,10 @@ if(BUILD_TESTING)
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
         set_tests_properties(guest_zero_initializer PROPERTIES TIMEOUT 30)
         add_asan_test_options(guest_zero_initializer verify_asan_link_order=0)
+        add_test(NAME linux_guest_named_imports COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_linux_guest_named_imports.py
+            $<TARGET_FILE:relinker> $<TARGET_FILE:guest_module_args_host>)
+        add_asan_test_options(linux_guest_named_imports verify_asan_link_order=0)
         set(windows_stdio_host_arguments)
         if(WIN32)
             if(MINGW)
