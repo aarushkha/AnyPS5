@@ -149,10 +149,13 @@ constexpr int NET_SO_REUSEADDR = 0x4;
 constexpr int NET_SO_KEEPALIVE = 0x8;
 constexpr int NET_SO_BROADCAST = 0x20;
 constexpr int NET_SO_ONESBCAST = 0x10000;
+constexpr int NET_SO_OOBINLINE = 0x100;
 constexpr int NET_SO_SNDBUF = 0x1001;
 constexpr int NET_SO_RCVBUF = 0x1002;
 constexpr int NET_SO_SCE_SNDTIMEO = 0x1105;
 constexpr int NET_SO_SCE_RCVTIMEO = 0x1106;
+constexpr int NET_SO_TYPE = 0x1008;
+constexpr int NET_SO_ACCEPTCONN = 0x2;
 constexpr int NET_MSG_PEEK = 0x2;
 constexpr int NET_MSG_TRUNC = 0x10;
 constexpr int NET_MSG_DONTWAIT = 0x80;
@@ -270,6 +273,7 @@ struct Sock {
     bool aborted = false;
     bool sending_shut = false;
     bool read_shut = false;
+    bool oobInline = false;
     int reported_error = 0;
     int snd_buffer = 0;
     int rcv_buffer = 0;
@@ -1470,7 +1474,12 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
     if (!optval || optlen < sizeof(int)) return fail(NET_EINVAL);
     int value = 0;
     std::memcpy(&value, optval, sizeof(value));
-    if (optname == NET_SO_NBIO) {
+    if (optname == NET_SO_OOBINLINE) {
+        const int enabled = value != 0;
+        if (socket.type == NET_SOCK_STREAM &&
+            ::setsockopt(socket.native->value, SOL_SOCKET, SO_OOBINLINE, reinterpret_cast<const char*>(&enabled), sizeof(enabled)) != 0)
+            return fail(native_error());
+    } else if (optname == NET_SO_NBIO) {
 #ifndef _WIN32
         const int old_flags = fcntl(socket.native->value, F_GETFL, 0);
         if (old_flags < 0 || fcntl(socket.native->value, F_SETFL,
@@ -1496,6 +1505,7 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
     std::lock_guard lk(g_mutex);
     auto it = g_socks.find(s);
     if (it != g_socks.end()) {
+        if (optname == NET_SO_OOBINLINE && it->second.native == socket.native) it->second.oobInline = value != 0;
         if (optname == NET_SO_NBIO) it->second.native->nonblock = value != 0;
         if (optname == NET_SO_RCVTIMEO) it->second.native->receiveTimeout = value;
         if (optname == NET_SO_SNDTIMEO) it->second.native->sendTimeout = value;
@@ -1516,6 +1526,26 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         socket = it->second;
     }
     if (optval == nullptr || optlen == nullptr) return fail(NET_EINVAL);
+    if (level == NET_SOL_SOCKET && (optname == NET_SO_TYPE || optname == NET_SO_ACCEPTCONN)) {
+        const int value = optname == NET_SO_TYPE ? socket.type : socket.listening ? NET_SO_ACCEPTCONN : 0;
+        *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(value)));
+        std::memcpy(optval, &value, *optlen);
+        return 0;
+    }
+    if (level == NET_SOL_SOCKET && optname == NET_SO_OOBINLINE) {
+        int enabled = 0;
+        if (socket.type == NET_SOCK_STREAM) {
+            NativeLength size = sizeof(enabled);
+            if (::getsockopt(socket.native->value, SOL_SOCKET, SO_OOBINLINE, reinterpret_cast<char*>(&enabled), &size) != 0)
+                return fail(native_error());
+        } else {
+            enabled = socket.oobInline;
+        }
+        const int value = enabled != 0 ? NET_SO_OOBINLINE : 0;
+        *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(value)));
+        std::memcpy(optval, &value, *optlen);
+        return 0;
+    }
     if (level == NET_SOL_SOCKET && optname == NET_SO_PROTOCOL) {
         if (socket.type == NET_SOCK_RAW) NotImplemented_nid_no_patch(__func__);
         *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(socket.protocol)));
@@ -1552,11 +1582,22 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         std::memcpy(optval, &value, *optlen);
         return 0;
     }
-    if (*optlen < sizeof(int)) return fail(NET_EINVAL);
+    if (*optlen < sizeof(int) &&
+        !(level == NET_SOL_SOCKET && (optname == NET_SO_REUSEADDR || optname == NET_SO_BROADCAST))) return fail(NET_EINVAL);
     if (level == NET_IPPROTO_TCP) return fail(NET_ENOPROTOOPT);
     if (level != NET_SOL_SOCKET) return fail(NET_EOPNOTSUPP);
     int value = 0;
     switch (timeout_option(optname)) {
+        case NET_SO_REUSEADDR:
+        case NET_SO_BROADCAST: {
+            int enabled = 0;
+            NativeLength size = sizeof(enabled);
+            const int nativeOption = optname == NET_SO_REUSEADDR ? SO_REUSEADDR : SO_BROADCAST;
+            if (::getsockopt(socket.native->value, SOL_SOCKET, nativeOption, reinterpret_cast<char*>(&enabled), &size) != 0)
+                return fail(native_error());
+            value = enabled != 0 ? optname : 0;
+            break;
+        }
         case NET_SO_NBIO: value = socket.native->nonblock ? 1 : 0; break;
         case NET_SO_RCVTIMEO: value = socket.native->receiveTimeout; break;
         case NET_SO_SNDTIMEO: value = socket.native->sendTimeout; break;
@@ -1588,8 +1629,8 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         }
         default: return fail(NET_EOPNOTSUPP);
     }
-    std::memcpy(optval, &value, sizeof(value));
-    *optlen = sizeof(value);
+    *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(value)));
+    std::memcpy(optval, &value, *optlen);
     return 0;
 }
 
